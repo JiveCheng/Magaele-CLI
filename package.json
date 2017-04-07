@@ -1,0 +1,28 @@
+{
+  "name": "magaele-cli",
+  "version": "0.0.1",
+  "description": "a toolkit for help you operate svn release module and publish to npm",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JiveCheng/Magaele-CLI.git"
+  },
+  "keywords": [
+    "magaele"
+  ],
+  "author": "jivecheng",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JiveCheng/Magaele-CLI/issues"
+  },
+  "bin": {
+    "magaele": "./bin/command.js"
+  },
+  "homepage": "https://github.com/JiveCheng/Magaele-CLI#readme",
+  "dependencies": {
+    "node-svn-ultimate": "^1.0.4"
+  }
+}
