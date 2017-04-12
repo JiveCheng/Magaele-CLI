@@ -24,6 +24,7 @@
   "homepage": "https://github.com/JiveCheng/Magaele-CLI#readme",
   "dependencies": {
     "deep-extend": "^0.4.1",
-    "node-svn-ultimate": "^1.0.4"
+    "node-svn-ultimate": "^1.0.4",
+    "promise": "^7.1.1"
   }
 }

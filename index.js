@@ -1,3 +1,4 @@
+var promise = require('promise');
 var program = require('commander');
 var path = require('path');
 var url = require('url');
@@ -23,12 +24,30 @@ MAGAELELIB.DEFAULTS = {
 	repositoryUrl: 'http://svn.liontech.com.tw/svn/liondesignrepo/magaele/'
 };
 
-MAGAELELIB.prototype.svnGetLocalModuleRoot = function() {
-	var path;
-	svnUltimate.commands.list(this.repositoryUrl, function(err, json) {
-
-	});
-	return path;
+MAGAELELIB.prototype.svnGetModuleRoot = function( remoteLocal ) {
+	var returnPath;
+	if ( typeof remoteLocal === 'string' ) {
+		svnUltimate.commands.list(this.repositoryUrl, function(err, json) {
+			// console.log(this);
+			var currentLocationArray = path.resolve().split(path.sep);
+			var loadRemoteModules = MAGALIB.listRemoteModules(json.list.entry);
+			var currentMatchRemote = currentLocationArray.filter(function(string) {
+				return loadRemoteModules.indexOf(string) !== -1;
+			});
+			if ( currentMatchRemote.length === 1 ) {
+				if ( remoteLocal === 'local' ) {
+					path = currentLocationArray.slice( 0, currentLocationArray.indexOf( currentMatchRemote.toString() ) + 1 ).join(path.sep);
+				} else if ( remoteLocal === 'remote' ) {
+					path = url.resolve(MAGALIB.repositoryUrl, currentMatchRemote.toString());
+				}
+			} else if ( currentMatchRemote.length > 1 ) {
+				MAGALIB.logError('Mateched tow string:', currentMatchRemote);
+			} else {
+				MAGALIB.logError(0);
+			}
+		});
+	}
+	return returnPath;
 };
 
 MAGAELELIB.prototype.listRemoteModules = function( data ) {
@@ -171,6 +190,7 @@ MAGAELELIB.prototype.svnGetLocalStatus = function() {
 					MAGALIB.logError(2);
 				}
 			} else {
+
 				MAGALIB.logError(1);
 			}
 		} else {
@@ -180,20 +200,10 @@ MAGAELELIB.prototype.svnGetLocalStatus = function() {
 };
 
 MAGAELELIB.prototype.svnGetInitData = function() {
+	MAGALIB.moduleLocalRoot = MAGALIB.svnGetModuleRoot('local');
 	svnUltimate.commands.list( MAGALIB.repositoryUrl, function(err, json) {
-		var currentLocationArray = path.resolve().split(path.sep);
-		var loadRemoteModules = MAGALIB.listRemoteModules(json.list.entry);
-		var currentMatchRemote = currentLocationArray.filter(function(string) {
-			return loadRemoteModules.indexOf(string) !== -1;
-		});
-		if ( currentMatchRemote.length === 1 ) {
-			MAGALIB.moduleLocalRoot = currentLocationArray.slice( 0, currentLocationArray.indexOf( currentMatchRemote.toString() ) + 1 ).join(path.sep);
-			MAGALIB.moduleRemoteRoot = url.resolve(MAGALIB.repositoryUrl, currentMatchRemote.toString());
-		} else if ( currentMatchRemote.length > 1 ) {
-			MAGALIB.logError('Mateched tow string:', currentMatchRemote);
-		} else {
-			MAGALIB.logError(0);
-		}
+		
+
 		// console.log(currentModuleRootPath);
 		console.log( MAGALIB );
 		
