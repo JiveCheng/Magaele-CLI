@@ -2,6 +2,7 @@ var Promise = require('promise');
 var program = require('commander');
 var path = require('path');
 var url = require('url');
+var urljoin = require('url-join');
 var readline = require('readline');
 var svnUltimate = require('node-svn-ultimate');
 var deepExtend = require('deep-extend');
@@ -12,13 +13,19 @@ var rl = readline.createInterface({
 });
 
 var MAGAELELIB = function(options) {
-	this.localPath = options.localPath;
-	this.repositoryUrl = options.repositoryUrl;
 	this.localPathRegex = options.localPathRegex;
 	this.remotePathRegex = options.remotePathRegex;
+	this.standardSvnFlow = options.standardSvnFlow;
+	this.localPath = options.localPath;
+	this.repositoryUrl = options.repositoryUrl;
 	this.moduleLocalRoot = '';
 	this.moduleRemoteRoot = '';
+	this.moduelDevelopRelativeRoot = '.';
 	this.moduelReleaseRelativeRoot = '.';
+	this.moduleRemoteDevelopPath = '';
+	this.moduleRemoteReleasePath = '';
+	this.moduleReleaseVersionList = [];
+	this.moduleReleaseLastVersion = '';
 };
 
 MAGAELELIB.DEFAULTS = {
@@ -26,53 +33,27 @@ MAGAELELIB.DEFAULTS = {
 	localPathRegex: /([A-Z|a-z]:\\[^*|"<>?\n]*)|(\\\\.*?\\.*)/,
 	remotePathRegex: /(http[s]?:\/\/)?([^\/\s]+\/)(.*)/,
 	repositoryUrl: 'http://svn.liontech.com.tw/svn/liondesignrepo/magaele/',
+	standardSvnFlow: false,
 };
 
-MAGAELELIB.prototype.svnGetModuleRoot = function( remoteLocal ) {
-	return new Promise(function(resolve, reject){
-		if ( typeof remoteLocal === 'string' ) {
-			svnUltimate.commands.list(this.repositoryUrl, function(err, json) {
-				// console.log(JSON.stringify(err, null, 2), JSON.stringify(json, null, 2));
-				if ( !!err && err !== null ) {
-					reject(err);
-					MAGALIB.logError(3);
-				} else {
-					var currentLocationArray = path.resolve().split(path.sep);
-					var loadRemoteModules = MAGALIB.listRemoteModules(json.list.entry);
-					var currentMatchRemote = currentLocationArray.filter(function(string) {
-						return loadRemoteModules.indexOf(string) !== -1;
-					});
-					if ( currentMatchRemote.length === 1 ) {
-						if ( remoteLocal === 'local' ) {
-							resolve( currentLocationArray.slice( 0, currentLocationArray.indexOf( currentMatchRemote.toString() ) + 1 ).join(path.sep) );
-						} else if ( remoteLocal === 'remote' ) {
-							resolve( url.resolve(MAGALIB.repositoryUrl, currentMatchRemote.toString()) );
-						}
-					} else if ( currentMatchRemote.length > 1 ) {
-						MAGALIB.logError('Mateched tow string:', currentMatchRemote);
-					} else {
-						MAGALIB.logError(0);
-					}
-				}
-			});
-		}
-	});
-};
-
-MAGAELELIB.prototype.listRemoteModules = function( data ) {
+MAGAELELIB.prototype.listRemoteToArray = function( data, kindFilter ) {
 	// console.log(JSON.stringify(data, null, 2), Array.isArray(data));
 	var list = [];
 	var conditionDir;
 	if ( Array.isArray(data) ) {
 		for (var i = 0; i < data.length; i++) {
-			conditionDir = data[i].$.kind === 'dir';
-			if ( conditionDir ) {
+			conditionDir = data[i].$.kind === kindFilter;
+			if ( !!kindFilter && conditionDir ) {
+				list.push(data[i].name);
+			} else {
 				list.push(data[i].name);
 			}
 		}
 	} else if ( typeof data === 'object' ) {
-		conditionDir = data.$.kind === 'dir';
-		if ( conditionDir ) {
+		conditionDir = data.$.kind === kindFilter;
+		if ( !!kindFilter && conditionDir ) {
+			list.push(data.name);
+		} else {
 			list.push(data.name);
 		}
 	}
@@ -177,7 +158,15 @@ MAGAELELIB.prototype.logError = function( string, value ) {
 			case 3:
 				string = 'error: System error';
 			break;
-
+			case 4:
+				string = 'error: There are files yet to add to remote:\n' + value;
+			break;
+			case 5:
+				string = 'error: The operation is interrupted by the user';
+			break;
+			case 6:
+				string = 'error: Commit log is required';
+			break;
 		}
 		console.log( string );
 	} else if ( !!string && !!value ) {
@@ -192,41 +181,145 @@ MAGAELELIB.prototype.svnGetLocalStatus = function() {
 	var self = this;
 	return new Promise(function(resolve, reject){
 		svnUltimate.commands.status('./', function(err, json) {
-			console.log(JSON.stringify(err, null, 2), JSON.stringify(json, null, 2));
-
-			if ( !!json && !!json.target.entry ) {
-				if ( Array.isArray(json.target.entry) ) {
-					var hasModified = json.target.entry.find(function(item) {
-						return item['wc-status'].$.item === 'modified';
-					});
-					resolve(hasModified);
-					/*if ( !hasModified ) {
-						self.svnGetInitData();
-					} else {
-						MAGALIB.logError(2);
-					}*/
-				} else if (true) {
-
-					MAGALIB.logError(1);
-				}
-			} else if ( self.localPathRegex.test(self.moduleLocalRoot.length) > 0 ) {
-				resolve('ready');
+			// console.log(JSON.stringify(err, null, 2), JSON.stringify(json, null, 2));
+			var modifieds, unversions, deleteds;
+			if ( !!err && err !== null ) {
+				reject(err);
+				self.logError(3);
 			} else {
-				MAGALIB.logError(0);
+				// console.log(self.localPathRegex.test(self.moduleLocalRoot));
+				if ( !!json && !!json.target.entry ) {
+					if ( Array.isArray(json.target.entry) ) {
+						modifieds = json.target.entry.filter(function(item) {
+							return item['wc-status'].$.item === 'modified';
+						}).map(function(obj) {
+							return obj.$.path;
+						});
+						unversions = json.target.entry.filter(function(item) {
+							return item['wc-status'].$.item === 'unversioned';
+						}).map(function(obj) {
+							return obj.$.path;
+						});
+						deleteds = json.target.entry.filter(function(item) {
+							return item['wc-status'].$.item === 'deleted';
+						}).map(function(obj) {
+							return obj.$.path;
+						});
+						// console.log(modifieds, unversions, deleteds);
+
+						if ( !!unversions && unversions.length > 0 ) {
+							resolve( {
+								status: 'hasUnversioned',
+								files: unversions
+							} );
+						} else if ( !!deleteds && unversions.length > 0) {
+							resolve( {
+								status: 'hasDeleted',
+								files: deleteds
+							} );
+						} else if ( !!modifieds && modifieds.length > 0 ) {
+							resolve( {
+								status: 'hasModified',
+								files: modifieds
+							} );
+						}
+					} else if ( typeof json.target.entry === 'object' ) {
+						if ( json.target.entry['wc-status'].$.item === 'modified' ) {
+							modifieds = json.target.entry.$.path;
+						} else if( json.target.entry['wc-status'].$.item === 'unversioned' ) {
+							unversions = json.target.entry.$.path;
+						} else if( json.target.entry['wc-status'].$.item === 'deleted' ) {
+							deleteds = json.target.entry.$.path;
+						}
+						// console.log(modifieds, unversions, deleteds);
+						if ( !!unversions ) {
+							resolve( {
+								status: 'hasUnversioned',
+								files: unversions
+							} );
+						} else if ( !!deleteds ) {
+							resolve( {
+								status: 'hasDeleted',
+								files: deleteds
+							} );
+						} else if ( !!modifieds ) {
+							resolve( {
+								status: 'hasModified',
+								files: modifieds
+							} );
+						}
+					} else {
+						self.logError(1);
+					}
+				} else if ( self.localPathRegex.test(self.moduleLocalRoot) ) {
+					resolve({
+						status: 'READY',
+						files: null
+					});
+				} else {
+					self.logError(0);
+				}
 			}
 		});
 	});
 };
 
-MAGAELELIB.prototype.svnGetInitData = function() {
-	MAGALIB.moduleLocalRoot = MAGALIB.svnGetModuleRoot('local');
-	svnUltimate.commands.list( MAGALIB.repositoryUrl, function(err, json) {
-		
+MAGAELELIB.prototype.svnGetList = function( dirOption ) {
+	var self = this,
+		dir;
+	if ( typeof dirOption === 'string' && dirOption === 'ROOTPATH' ) {
+		dir = this.repositoryUrl;
+	} else {
+		dir = dirOption;
+	}
+	return new Promise(function(resolve, reject){
+		svnUltimate.commands.list(dir, function(err, json) {
+			// console.log(JSON.stringify(err, null, 2), JSON.stringify(json, null, 2));
+			var currentLocationArray, loadRemoteModules, currentMatchRemote;
+			if ( !!err && err !== null ) {
+				reject(err);
+				self.logError(3);
+			} else {
+				if ( dirOption === 'ROOTPATH' ) {
+					currentLocationArray = path.resolve().split(path.sep);
+					loadRemoteModules = self.listRemoteToArray(json.list.entry, 'dir');
+					currentMatchRemote = currentLocationArray.filter(function(string) {
+						return loadRemoteModules.indexOf(string) !== -1;
+					});
+					// console.log(currentLocationArray, loadRemoteModules, currentMatchRemote);
+					if ( currentMatchRemote.length === 1 ) {
+						resolve( {
+							localPath: currentLocationArray.slice( 0, currentLocationArray.indexOf( currentMatchRemote.toString() ) + 1 ).join(path.sep),
+							remotePath: url.resolve(self.repositoryUrl, currentMatchRemote.toString())
+						} );
+					} else if ( currentMatchRemote.length > 1 ) {
+						self.logError('Mateched tow string:', currentMatchRemote);
+					} else {
+						self.logError(0);
+					}					
+				} else {
+					loadRemoteList = self.listRemoteToArray(json.list.entry);
+					resolve( loadRemoteList );
+				}
+			}
+		});
+	});
+};
 
-		// console.log(currentModuleRootPath);
-		console.log( MAGALIB );
-		
-	} );
+MAGAELELIB.prototype.svnCommit = function( logString ) {
+	return new Promise(function(resolve, reject) {
+		svnUltimate.commands.commit('./', {
+			params: [ '-m "' + logString + '"' ]
+		}, function(err, json) {
+			if ( !!err && err !== null ) {
+				reject(err);
+				self.logError(3);
+			} else {
+				console.log(json);
+				resolve( true );
+			}
+		});
+	});
 };
 // RELEASE VSERSION ON REMOTE
 /*svnUltimate.commands.copy(
@@ -240,6 +333,69 @@ MAGAELELIB.prototype.svnGetInitData = function() {
 	}
 );*/
 
+MAGAELELIB.prototype.questionNeedCommit = function( needCommitFiles ) {
+	return new Promise(function(resolve, reject){
+		rl.question('還有檔案未Commit：\n' + needCommitFiles + '\n要Commit嗎？(y/n)', function( answer ) {
+			if ( answer === 'y' || answer === 'yes' ) {
+				resolve( true );
+			} else {
+				reject( false );
+			}
+		});
+	});
+};
+
+MAGAELELIB.prototype.questionCommitLog = function() {
+	return new Promise(function(resolve, reject){
+		rl.question('請問這次Commit的Log？', function( logString ) {
+			if ( !!logString && logString.length > 4 ) {
+				resolve( logString );
+			} else {
+				reject( false );
+			}
+		});
+	});
+};
+
+MAGAELELIB.prototype.questionReadyRelease = function() {
+	var self = this;
+	// console.log(self, self.moduleRemoteRoot);
+	return new Promise(function(resolve, reject){
+		var developPath = urljoin( self.moduleRemoteRoot, self.moduelDevelopRelativeRoot );
+		rl.question('可以發佈了！請問你的develop目錄？(' + developPath + ')', function( pathAnswer ) {
+			if ( !!pathAnswer && pathAnswer.length > 0 ) {
+				resolve( url.resolve( developPath, pathAnswer ) );
+			} else {
+				resolve( developPath );
+			}
+		});
+	});
+};
+
+MAGAELELIB.prototype.questionReleasePath = function() {
+	var self = this;
+	return new Promise(function(resolve, reject){
+		var releasePath = urljoin( self.moduleRemoteRoot, self.moduelReleaseRelativeRoot );
+		rl.question('請確認你的release目錄(' + releasePath + ')', function( pathAnswer ) {
+			if ( !!pathAnswer && pathAnswer.length > 0 ) {
+				resolve( url.resolve( releasePath, pathAnswer ) );
+			} else {
+				resolve( releasePath );
+			}
+		});
+	});
+};
+
+MAGAELELIB.prototype.questionReleaseVersion = function() {
+	var self = this;
+	return new Promise(function(resolve, reject){
+		var releasePath = urljoin( self.moduleRemoteRoot, self.moduelReleaseRelativeRoot );
+		rl.question('請問本次要release的版本號為？(' + MAGALIB.defaultNextVersion( lastVersion ) + ')', function(userVersion) {
+			console.log(lastVersion, defaultNextVersion, userVersion);
+		});
+	});
+};
+
 var MAGALIB = new MAGAELELIB( function( EXTENDEDOPTS, DEFAULTS, NEW ){
 	deepExtend( EXTENDEDOPTS, DEFAULTS, NEW );
 	return EXTENDEDOPTS;
@@ -249,42 +405,61 @@ var MAGALIB = new MAGAELELIB( function( EXTENDEDOPTS, DEFAULTS, NEW ){
 program
 	.version('0.0.1')
 	.option('-p, --publish', 'publish module', function() {
-		var questionReleasePath = function( nextHandler ) {
-			rl.question('請問將要release的來源develop目錄？(' + path.resolve() + ')', function(userPath) {
-				var p = userPath || path.resolve();
-				var pathVerify = /([a-zA-Z]:)?(\\[\sa-zA-Z0-9_-]+)+\\?/.test(p);
-				if ( pathVerify ) {
-					console.log('你將要release的目錄為：' + p );
-					nextHandler();
-				} else {
-					console.log('你輸入的不是一個目錄路徑');
-				}
-			});
-		};
-		var questionVersion = function ( lastVersion, nextHandler ) {
-			rl.question('請問本次要release的版本號為？(' + MAGALIB.defaultNextVersion( lastVersion ) + ')', function(userVersion) {
-				console.log(lastVersion, defaultNextVersion, userVersion);
-			});
-		};
-		// console.log(MAGALIB.svnGetModuleRoot().__proto__);
-		MAGALIB.svnGetModuleRoot('local').then(function(returnPath) {
-			console.log(returnPath);
-			MAGALIB.moduleLocalRoot = returnPath;
-			return MAGALIB.svnGetModuleRoot('remote');
-		}).then(function(returnPath) {
-			MAGALIB.moduleRemoteRoot = returnPath;
+		MAGALIB.svnGetList('ROOTPATH').then(function( returnPath ) {
+			// console.log('ROOTPATH:',returnPath);
+			MAGALIB.moduleLocalRoot = returnPath.localPath;
+			MAGALIB.moduleRemoteRoot = returnPath.remotePath;
+			return MAGALIB.svnGetList( MAGALIB.moduleRemoteRoot );
+		}).then(function( remoteList ) {
+			// console.log('remoteList:', remoteList);
+			if ( remoteList.indexOf('develop') !== -1 ) {
+				MAGALIB.moduelDevelopRelativeRoot = '/develop';
+				MAGALIB.moduelReleaseRelativeRoot = '/release';
+				MAGALIB.standardSvnFlow = true;
+			} else {
+				MAGALIB.moduelDevelopRelativeRoot = '/';
+				MAGALIB.moduelReleaseRelativeRoot = '/';
+			}
 			return MAGALIB.svnGetLocalStatus();
-		}).then(function(status) {
-			// console.log(status);
+		}).then(function( status ) {
+			// console.log('status:', status);
+			if ( status.status === 'hasUnversioned' ) {
+				MAGALIB.logError(4, status.files);
+			} else if ( status.status === 'hasDeleted' ) {
+				MAGALIB.logError(4, status.files);
+			} else if ( status.status === 'hasModified' ) {
+				MAGALIB.questionNeedCommit( status.files ).then(function( answer ) {
+					// console.log( answer );
+					return MAGALIB.questionCommitLog();
+				}, function( answer ) {
+					MAGALIB.logError(5);
+				}).then(function( logString ) {
+					// console.log( logString );
+					return MAGALIB.svnCommit( logString );
+				}, function( err ) {
+					MAGALIB.logError(6);
+				}).then(function( commitSuccess ) {
+					console.log( commitSuccess );
+				});
+			} else if ( status.status === 'READY' ) {
+				return MAGALIB.questionReadyRelease();
+			} else {
+				MAGALIB.logError(3, status.files);
+			}
+		}).then(function( developPath ) {
+			// console.log(developPath);
+			MAGALIB.moduleRemoteDevelopPath = developPath;
+			return MAGALIB.questionReleasePath();
+		}).then(function( releasePath ) {
+			// console.log(releasePath);
+			MAGALIB.moduleRemoteReleasePath = releasePath;
+			return MAGALIB.svnGetList( MAGALIB.moduleRemoteReleasePath );
+		}).then(function( versionArray ) {
+			// console.log(versionArray);
+			MAGALIB.moduleReleaseVersionList = versionArray;
+			MAGALIB.moduleReleaseLastVersion = versionArray[versionArray.length - 1];
+			return MAGALIB.questionReleaseVersion();
 		});
-		/*svnUltimate.commands.info('http://svn.liontech.com.tw/svn/liondesignrepo/magaele', function(err, json) {
-			console.log(JSON.stringify(json, null, 2));
-		});*/
-		// GET REMOTE ALL RELEASE VERSION
-		/*svnUltimate.commands.list('http://svn.liontech.com.tw/svn/liondesignrepo/magaele/core/release', function(err, json) {
-			console.log(err, json);
-		});*/
-
 	})
 	.parse(process.argv);
 
@@ -297,4 +472,4 @@ program.on('--help', function(){
 });
 if ( !program.rawArgs[2] ) {
 	program.help();
-}
+};
