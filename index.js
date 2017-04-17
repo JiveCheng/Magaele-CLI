@@ -40,7 +40,7 @@ MAGAELELIB.DEFAULTS = {
 	localPathRegex: /([A-Z|a-z]:\\[^*|"<>?\n]*)|(\\\\.*?\\.*)/,
 	remotePathRegex: /(http[s]?:\/\/)?([^\/\s]+\/)(.*)/,
 	versionMatchRegex: /v\d+.\d+.\d+/,
-	repositoryUrl: 'https://jive-pc/svn/magaele/',//'http://svn.liontech.com.tw/svn/liondesignrepo/magaele/',
+	repositoryUrl: 'http://svn.liontech.com.tw/svn/liondesignrepo/magaele/',
 	standardSvnFlow: false,
 };
 
@@ -151,8 +151,11 @@ MAGAELELIB.prototype.defaultNextVersion = function( lastV ) {
 };
 
 MAGAELELIB.prototype.hasPackageJson = function( pathString ) {
-	var targetPath = pathString || this.moduleLocalDevelopPath;
-	return fs.lstatSync( targetPath ).isDirectory();
+	var targetPath = function(dirPath, fileName){
+		var dir = dirPath;
+		return path.join( dir, './package.json' );
+	}(pathString || this.moduleLocalDevelopPath);
+	return fs.existsSync( targetPath );
 };
 
 MAGAELELIB.prototype.logError = function( string, value ) {
@@ -372,7 +375,7 @@ MAGAELELIB.prototype.svnRelease = function( targetUrl ) {
 			self.moduleRemoteDevelopPath,
 			targetUrl,
 			{
-				params: [ '-m "release module' + self.moduleName + ' ' + self.moduleReleaseNextVersion + '"' ]
+				params: [ '-m "release module ' + self.moduleName + ' ' + self.moduleReleaseNextVersion + '"' ]
 			}, function( err, json ) {
 				resolve( targetUrl );
 			}
@@ -402,25 +405,17 @@ MAGAELELIB.prototype.svnUpdate = function( targetPath ) {
 	});
 };
 
-MAGAELELIB.prototype.packageJsonEditor = function( version ) {
+MAGAELELIB.prototype.packageJsonEditor = function( object ) {
 	var self = this;
 	return new Promise(function(resolve, reject) {
 		fs.readFile(path.join(self.moduleLocalDevelopPath, 'package.json'), function (err, data) {
 			var jsonData;
-			var nextVersion = version || self.moduleReleaseNextVersion;
+			var nextVersion = object.version || self.moduleReleaseNextVersion;
 			if ( err ) {
 				reject( '開啟package.json錯誤！' );
 			} else{
 				jsonData = JSON.parse(data);
-				jsonData.version = nextVersion;
-				if ( !!jsonData.repository && typeof jsonData.repository === 'object' ) {
-					jsonData.repository.url = urljoin( self.moduleRemoteReleasePath, nextVersion );
-				} else {
-					jsonData.repository = {
-						type: 'svn',
-						url: urljoin( self.moduleRemoteReleasePath, nextVersion )
-					};
-				}
+				deepExtend( jsonData, object );
 				resolve(jsonData);
 			}
 		});
@@ -549,7 +544,18 @@ program
 	.version('0.0.1')
 	.option('-p, --publish', 'publish module', function() {
 		var prepareRelease = function() {
-			MAGALIB.questionReleasePath()
+			MAGALIB.questionReadyRelease()
+			.then(function( developPath ) {
+				console.log('你的remote develop目錄為：', developPath.remote);
+				console.log('你的local develop目錄為：', developPath.local);
+				MAGALIB.moduleRemoteDevelopPath = developPath.remote;
+				MAGALIB.moduleLocalDevelopPath = developPath.local;
+				if ( MAGALIB.hasPackageJson() ) {
+					return MAGALIB.questionReleasePath();
+				} else {
+					MAGALIB.logError('沒有發現package.json檔，請執行npm init');
+				}
+			})
 			.then(function( releasePath ) {
 				console.log('你的remote release目錄為：', releasePath.remote);
 				console.log('你的local release目錄為：', releasePath.local);
@@ -575,7 +581,13 @@ program
 			.then(function( releaseVersion ) {
 				console.log('你的release版本號為：', releaseVersion);
 				MAGALIB.moduleReleaseNextVersion = releaseVersion;
-				return MAGALIB.packageJsonEditor( releaseVersion );
+				return MAGALIB.packageJsonEditor( {
+					version: MAGALIB.moduleReleaseNextVersion,
+					repository: {
+						type: 'svn',
+						url: urljoin( MAGALIB.moduleRemoteReleasePath, MAGALIB.moduleReleaseNextVersion )
+					}
+				} );
 			}, function( errString ) {
 				console.log( errString );
 				startRelease();
@@ -590,7 +602,7 @@ program
 				// console.log( successBoolean );
 				return MAGALIB.svnCommit('package.json modified before magaele publish');
 			})
-			.then(function( successBoolean ) {
+			.then(function() {
 				// console.log( successBoolean );
 				return MAGALIB.svnRelease( urljoin( MAGALIB.moduleRemoteReleasePath, MAGALIB.moduleReleaseNextVersion ) );
 			}, function( err ) {
@@ -622,7 +634,7 @@ program
 			}, function( err ) {
 				MAGALIB.logError(6);
 			}).then(function( commitSuccess ) {
-				console.log( commitSuccess );
+				prepareRelease();
 			});
 		};
 		var startInit = function() {
@@ -653,20 +665,9 @@ program
 				} else if ( status.status === 'hasModified' ) {
 					startCommit( status );
 				} else if ( status.status === 'READY' ) {
-					return MAGALIB.questionReadyRelease();
+					prepareRelease();
 				} else {
 					MAGALIB.logError(3, status.files);
-				}
-			})
-			.then(function( developPath ) {
-				console.log('你的remote develop目錄為：', developPath.remote);
-				console.log('你的local develop目錄為：', developPath.local);
-				MAGALIB.moduleRemoteDevelopPath = developPath.remote;
-				MAGALIB.moduleLocalDevelopPath = developPath.local;
-				if ( MAGALIB.hasPackageJson() ) {
-					MAGALIB.logError('沒有發現package.json檔，請執行npm init');
-				} else {
-					prepareRelease();
 				}
 			});
 		}();
